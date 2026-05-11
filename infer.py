@@ -17,6 +17,10 @@ python3 infer.py --image ./assets/example_images/front.png --output ./output
 export PYTORCH_ENABLE_MPS_FALLBACK=1
 python3 infer.py --image ./assets/example_images/front.png --output ./output --texture
 
+# Texture only on an existing white mesh (skip shape generation):
+python3 infer.py --image ./assets/input.png --mesh_path ./output/06cc89ad/white_mesh.glb \
+    --output ./output --texture --max_num_view 9 --tex_resolution 768
+
 # From a URL:
 python3 infer.py --image "https://example.com/object.png" --output ./output --rembg
 
@@ -26,6 +30,20 @@ python3 infer.py --image ./front.png --output ./output --device cpu --texture
 
 import sys
 import os
+
+# macOS: PyTorch and trimesh/scipy each bundle their own libomp.dylib. When both
+# get loaded into the same process, Intel's OpenMP runtime detects the conflict
+# and either aborts or returns null pointers from __kmp_get_global_thread_id_reg,
+# causing a SIGSEGV at 0x580 inside __kmp_*. Setting this env var lets duplicates
+# coexist. Must be set BEFORE torch/numpy/trimesh are imported.
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+# Belt-and-suspenders: cap OMP threads so the two runtimes don't fight over the
+# same physical cores. On CPU inference this barely changes performance.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+
+import faulthandler
+faulthandler.enable()   # print C-level stack trace on segfault
 sys.path.insert(0, './hy3dshape')
 sys.path.insert(0, './hy3dpaint')
 
@@ -37,6 +55,7 @@ except Exception:
     pass
 
 import argparse
+import gc
 import time
 import uuid
 from pathlib import Path
@@ -59,6 +78,9 @@ def get_args():
                    help="Input image: local file path OR http(s):// URL")
     p.add_argument("--output", default="./output",
                    help="Output directory (created if absent). default: ./output")
+    p.add_argument("--mesh_path", default=None,
+                   help="Path to an existing white mesh (.glb or .obj) — skips shape "
+                        "generation and goes straight to texture. Requires --texture.")
 
     # Model paths
     p.add_argument("--model_path", default="tencent/Hunyuan3D-2.1")
@@ -75,6 +97,10 @@ def get_args():
     p.add_argument("--num_chunks", type=int, default=8000,
                    help="VAE decode chunk size (lower = less RAM). default: 8000")
     p.add_argument("--seed", type=int, default=1234)
+    p.add_argument("--max_num_view", type=int, default=8,
+                   help="Number of camera views for texture baking (more = better coverage). default: 8")
+    p.add_argument("--tex_resolution", type=int, default=768,
+                   help="Texture map resolution in pixels. default: 768")
 
     # Device — auto = CUDA → MPS → CPU
     p.add_argument("--device", default="auto",
@@ -88,6 +114,10 @@ def get_args():
                    help="Run texture generation after shape generation")
     p.add_argument("--no_remesh", action="store_true",
                    help="Skip remeshing in texture pipeline")
+    p.add_argument("--low_memory", action="store_true",
+                   help="Aggressive memory caps for 16 GB Macs (CPU path only): forces "
+                        "max_num_view=1, tex_resolution=384. Use only if default CPU "
+                        "path OOMs. No effect on CUDA.")
 
     return p.parse_args()
 
@@ -110,12 +140,29 @@ def print_stage(name: str):
     print(f"\n{'='*60}\n  {name}\n{'='*60}")
 
 
+def free_memory():
+    """Release Python GC + GPU caches before a heavy new stage."""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    if torch.backends.mps.is_available():
+        torch.mps.empty_cache()
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Main
 # ──────────────────────────────────────────────────────────────────────────────
 
 def main():
     args = get_args()
+
+    # ── --low_memory: CPU-only safety floor for 16 GB Macs ────────────────────
+    # Only kicks in when there's no CUDA. CUDA path is never throttled.
+    if args.low_memory and not torch.cuda.is_available():
+        args.max_num_view = min(args.max_num_view, 1)
+        args.tex_resolution = min(args.tex_resolution, 384)
+        print(f"[hy3d] --low_memory: max_num_view={args.max_num_view}, "
+              f"tex_resolution={args.tex_resolution}")
 
     # ── Device routing ────────────────────────────────────────────────────────
     # normalize_shape_device: CUDA → MPS → CPU  (MPS allowed for diffusion)
@@ -145,52 +192,71 @@ def main():
         image.save(run_dir / "rembg.png")
         print("  Done.")
 
-    # ── Shape generation ──────────────────────────────────────────────────────
-    print_stage(f"Shape generation  (steps={args.steps}  octree={args.octree_resolution}  cfg={args.guidance_scale}  device={shape_device})")
-
-    from hy3dshape import Hunyuan3DDiTFlowMatchingPipeline
-    from hy3dshape.pipelines import export_to_trimesh
+    # ── Shape generation (skip if --mesh_path provided) ───────────────────────
     import trimesh as _trimesh
 
-    i23d = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
-        args.model_path,
-        subfolder=args.subfolder,
-        use_safetensors=False,
-        device=str(shape_device),
-    )
+    shape_time = None
+    mesh = None
 
-    generator = torch.Generator()
-    generator.manual_seed(args.seed)
+    if args.mesh_path:
+        # Resume from an existing white mesh — skip shape generation entirely
+        print_stage(f"Loading existing mesh from {args.mesh_path}")
+        mesh = _trimesh.load(args.mesh_path, force="mesh")
+        print(f"  Mesh: {len(mesh.faces):,} faces  {len(mesh.vertices):,} vertices")
+        if not args.texture:
+            print("  (--texture not set; nothing more to do)")
+    else:
+        print_stage(f"Shape generation  (steps={args.steps}  octree={args.octree_resolution}  cfg={args.guidance_scale}  device={shape_device})")
 
-    t0 = time.time()
-    with torch.no_grad():
-        outputs = i23d(
-            image=image,
-            num_inference_steps=args.steps,
-            guidance_scale=args.guidance_scale,
-            generator=generator,
-            octree_resolution=args.octree_resolution,
-            num_chunks=args.num_chunks,
-            output_type="mesh",
+        from hy3dshape import Hunyuan3DDiTFlowMatchingPipeline
+        from hy3dshape.pipelines import export_to_trimesh
+
+        i23d = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
+            args.model_path,
+            subfolder=args.subfolder,
+            use_safetensors=False,
+            device=str(shape_device),
         )
-    shape_time = time.time() - t0
-    print(f"  Done in {shape_time:.1f}s")
 
-    mesh = export_to_trimesh(outputs)[0]
-    print(f"  Mesh: {len(mesh.faces):,} faces  {len(mesh.vertices):,} vertices")
+        generator = torch.Generator()
+        generator.manual_seed(args.seed)
 
-    white_path = str(run_dir / "white_mesh.glb")
-    mesh.export(white_path)
-    print(f"  Saved: {white_path}")
+        t0 = time.time()
+        with torch.no_grad():
+            outputs = i23d(
+                image=image,
+                num_inference_steps=args.steps,
+                guidance_scale=args.guidance_scale,
+                generator=generator,
+                octree_resolution=args.octree_resolution,
+                num_chunks=args.num_chunks,
+                output_type="mesh",
+            )
+        shape_time = time.time() - t0
+        print(f"  Done in {shape_time:.1f}s")
+
+        mesh = export_to_trimesh(outputs)[0]
+        print(f"  Mesh: {len(mesh.faces):,} faces  {len(mesh.vertices):,} vertices")
+
+        white_path = str(run_dir / "white_mesh.glb")
+        mesh.export(white_path)
+        print(f"  Saved: {white_path}")
+
+        # Free shape model memory before texture generation
+        del i23d, outputs
+        free_memory()
 
     # ── Texture generation ────────────────────────────────────────────────────
     tex_time = None
-    if args.texture:
+    if args.texture and mesh is not None:
         print_stage(f"Texture generation  (paint device: {paint_device})")
+
+        # Ensure memory is clean before loading texture models
+        free_memory()
 
         from hy3dpaint.textureGenPipeline import Hunyuan3DPaintPipeline, Hunyuan3DPaintConfig
 
-        conf = Hunyuan3DPaintConfig(max_num_view=8, resolution=768, device=paint_device)
+        conf = Hunyuan3DPaintConfig(max_num_view=args.max_num_view, resolution=args.tex_resolution, device=paint_device)
         conf.realesrgan_ckpt_path = "hy3dpaint/ckpt/RealESRGAN_x4plus.pth"
         conf.multiview_cfg_path   = "hy3dpaint/cfgs/hunyuan-paint-pbr.yaml"
         conf.custom_pipeline      = "hy3dpaint/hunyuanpaintpbr"
@@ -216,7 +282,8 @@ def main():
     # ── Summary ───────────────────────────────────────────────────────────────
     print_stage("Done")
     print(f"  Output  : {run_dir}")
-    print(f"  Shape   : {shape_time:.1f}s  (device={shape_device})")
+    if shape_time is not None:
+        print(f"  Shape   : {shape_time:.1f}s  (device={shape_device})")
     if tex_time is not None:
         print(f"  Texture : {tex_time:.1f}s  (device={paint_device})")
 

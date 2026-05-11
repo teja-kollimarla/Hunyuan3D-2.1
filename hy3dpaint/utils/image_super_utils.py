@@ -22,6 +22,9 @@ class imageSuperNet:
         from basicsr.archs.rrdbnet_arch import RRDBNet
 
         model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
+        # half=True requires CUDA; on CPU it causes fp16 crashes → disable automatically.
+        import torch as _torch
+        _use_half = _torch.cuda.is_available()
         upsampler = RealESRGANer(
             scale=4,
             model_path=config.realesrgan_ckpt_path,
@@ -30,7 +33,7 @@ class imageSuperNet:
             tile=0,
             tile_pad=10,
             pre_pad=0,
-            half=True,
+            half=_use_half,
             gpu_id=None,
         )
         self.upsampler = upsampler

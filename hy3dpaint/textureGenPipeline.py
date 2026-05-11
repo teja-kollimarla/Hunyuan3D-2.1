@@ -13,6 +13,7 @@
 # by Tencent in accordance with TENCENT HUNYUAN COMMUNITY LICENSE AGREEMENT.
 
 import os
+import gc
 import torch
 import copy
 import trimesh
@@ -66,8 +67,36 @@ class Hunyuan3DPaintConfig:
 
         self.raster_mode = "cr"
         self.bake_mode = "back_sample"
-        self.render_size = 1024 * 2
-        self.texture_size = 1024 * 4
+
+        # Canvas sizes: full on CUDA (upstream behavior), reduced on CPU/MPS.
+        # Without attention slicing (incompatible with this model's custom
+        # multiview processors), attention memory is O((H*W/16)² × views²).
+        # Render size dominates — 1024 → 768 cuts attention activation by ~3.2×.
+        _is_cuda = (self.device.type == "cuda")
+        if _is_cuda:
+            self.render_size = 1024 * 2     # 2048 — upstream default
+            self.texture_size = 1024 * 4    # 4096 — upstream default
+        else:
+            self.render_size = 768          # was 1024 — attention quadratic
+            self.texture_size = 1024 * 2    # 2048
+
+        # View cap: on CPU, all selected views go through the UNet jointly, so
+        # attention seq length is num_views × (H*W/16). Without slicing we need
+        # this small. 2 views is the sweet spot for 24 GB Macs.
+        if not _is_cuda and max_num_view > 2:
+            print(f"[hy3d] CPU path: capping max_num_view {max_num_view} -> 2 to fit memory.")
+            max_num_view = 2
+
+        # UNet runs at `resolution` (custom_view_size in multiview_utils.py).
+        # Seq length is O((res/8)² × views). 768 → 9216 tok/view, 2 views fused
+        # → ~18k tokens; attention workspace at fp32 dominates RAM and gets the
+        # process OOM-killed right after rendering. 384 → 2304 tok/view → ~16×
+        # smaller attention activation. Override by passing --tex_resolution
+        # explicitly below 384; we only clamp the upstream-CUDA default.
+        if not _is_cuda and resolution > 384:
+            print(f"[hy3d] CPU path: capping tex_resolution {resolution} -> 384 to fit memory.")
+            resolution = 384
+
         self.max_selected_view_num = max_num_view
         self.resolution = resolution
         self.bake_exp = 4
@@ -139,7 +168,9 @@ class Hunyuan3DPaintPipeline:
         path = os.path.dirname(mesh_path)
         if use_remesh:
             processed_mesh_path = os.path.join(path, "white_mesh_remesh.obj")
+            print("[dbg] step: remesh_mesh", flush=True)
             remesh_mesh(mesh_path, processed_mesh_path)
+            print("[dbg] step: remesh_mesh done", flush=True)
         else:
             processed_mesh_path = mesh_path
 
@@ -148,22 +179,29 @@ class Hunyuan3DPaintPipeline:
             output_mesh_path = os.path.join(path, f"textured_mesh.obj")
 
         # Load mesh
+        print("[dbg] step: trimesh.load", flush=True)
         mesh = trimesh.load(processed_mesh_path)
+        print("[dbg] step: mesh_uv_wrap", flush=True)
         mesh = mesh_uv_wrap(mesh)
+        print("[dbg] step: render.load_mesh", flush=True)
         self.render.load_mesh(mesh=mesh)
+        print("[dbg] step: render.load_mesh done", flush=True)
 
         ########### View Selection #########
+        print("[dbg] step: bake_view_selection", flush=True)
         selected_camera_elevs, selected_camera_azims, selected_view_weights = self.view_processor.bake_view_selection(
             self.config.candidate_camera_elevs,
             self.config.candidate_camera_azims,
             self.config.candidate_view_weights,
             self.config.max_selected_view_num,
         )
-
+        print("[dbg] step: render_normal_multiview", flush=True)
         normal_maps = self.view_processor.render_normal_multiview(
             selected_camera_elevs, selected_camera_azims, use_abs_coor=True
         )
+        print("[dbg] step: render_position_multiview", flush=True)
         position_maps = self.view_processor.render_position_multiview(selected_camera_elevs, selected_camera_azims)
+        print("[dbg] step: rendering complete", flush=True)
 
         ##########  Style  ###########
         image_caption = "high quality"
@@ -178,6 +216,9 @@ class Hunyuan3DPaintPipeline:
         image_style = [image.convert("RGB") for image in image_style]
 
         ###########  Multiview  ##########
+        # Drop rasterizer/render intermediates before the UNet allocates.
+        gc.collect()
+        safe_cuda_empty_cache()
         multiviews_pbr = self.models["multiview_model"](
             image_style,
             normal_maps + position_maps,
@@ -185,6 +226,9 @@ class Hunyuan3DPaintPipeline:
             custom_view_size=self.config.resolution,
             resize_input=True,
         )
+        # Drop UNet activation residuals before super-resolution allocates again.
+        gc.collect()
+        safe_cuda_empty_cache()
         ###########  Enhance  ##########
         enhance_images = {}
         enhance_images["albedo"] = copy.deepcopy(multiviews_pbr["albedo"])
@@ -194,6 +238,9 @@ class Hunyuan3DPaintPipeline:
             enhance_images["albedo"][i] = self.models["super_model"](enhance_images["albedo"][i])
             enhance_images["mr"][i] = self.models["super_model"](enhance_images["mr"][i])
 
+        # Drop super-resolution intermediates before bake's large texture buffers.
+        gc.collect()
+        safe_cuda_empty_cache()
         ###########  Bake  ##########
         for i in range(len(enhance_images)):
             enhance_images["albedo"][i] = enhance_images["albedo"][i].resize(
