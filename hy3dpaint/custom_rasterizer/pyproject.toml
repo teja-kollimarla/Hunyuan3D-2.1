@@ -1,0 +1,6 @@
+[build-system]
+# torch must be available when setup.py runs (it imports torch.utils.cpp_extension).
+# Listing it here makes plain `pip install -e .` work without --no-build-isolation.
+# For faster local iterations you can still use:  pip install -e . --no-build-isolation
+requires = ["setuptools", "wheel", "torch"]
+build-backend = "setuptools.build_meta"
