@@ -4,7 +4,15 @@
 #include <torch/extension.h>
 #include <vector>
 #include <ATen/ATen.h>
-#include <ATen/cuda/CUDAContext.h> // For CUDA context
+#ifdef WITH_CUDA
+#include <ATen/cuda/CUDAContext.h>
+#endif
+
+// __host__ / __device__ are CUDA qualifiers; define as no-ops when not using nvcc.
+#ifndef __CUDACC__
+#define __host__
+#define __device__
+#endif
 
 #define INT64 unsigned long long
 #define MAXINT 2147483647

@@ -12,7 +12,7 @@ void rasterizeTriangleCPU(int idx, float* vt0, float* vt1, float* vt2, int width
         for (int py = y_min; py < y_max + 1; ++py) {
             if (py < 0 || py >= height)
                 continue;
-            float vt[2] = {px + 0.5, py + 0.5};
+            float vt[2] = {px + 0.5f, py + 0.5f};
             float baryCentricCoordinate[3];
             calculateBarycentricCoordinate(vt0, vt1, vt2, vt, baryCentricCoordinate);
             if (isBarycentricCoordInBounds(baryCentricCoordinate)) {
@@ -122,18 +122,41 @@ std::vector<torch::Tensor> rasterize_image_cpu(torch::Tensor V, torch::Tensor F,
     return {findices, barycentric};
 }
 
+// CPU-only stub: raises at call time if the CUDA kernel was not compiled in.
+// The Python-level rasterizer (render.py) checks _HAS_GPU_KERNEL before calling.
+#ifndef WITH_CUDA
+std::vector<torch::Tensor> rasterize_image_gpu(torch::Tensor V, torch::Tensor F, torch::Tensor D,
+    int width, int height, float occlusion_truncation, int use_depth_prior)
+{
+    TORCH_CHECK(false,
+        "custom_rasterizer was built without CUDA support. "
+        "Move tensors to CPU before calling rasterize_image.");
+    return {};
+}
+#endif
+
 std::vector<torch::Tensor> rasterize_image(torch::Tensor V, torch::Tensor F, torch::Tensor D,
     int width, int height, float occlusion_truncation, int use_depth_prior)
 {
+    // Route by tensor device: CPU tensors always go to the CPU path.
+    // Python-level render.py handles moving tensors to CPU when no GPU kernel exists.
     int device_id = V.get_device();
     if (device_id == -1)
         return rasterize_image_cpu(V, F, D, width, height, occlusion_truncation, use_depth_prior);
+#ifdef WITH_CUDA
     else
         return rasterize_image_gpu(V, F, D, width, height, occlusion_truncation, use_depth_prior);
+#else
+    TORCH_CHECK(false, "custom_rasterizer: GPU tensor passed but built without CUDA.");
+    return {};
+#endif
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("rasterize_image", &rasterize_image, "Custom image rasterization");
   m.def("build_hierarchy", &build_hierarchy, "Custom image rasterization");
   m.def("build_hierarchy_with_feat", &build_hierarchy_with_feat, "Custom image rasterization");
+#ifdef WITH_CUDA
+  m.def("rasterize_image_gpu", &rasterize_image_gpu, "GPU rasterization (CUDA builds only)");
+#endif
 }

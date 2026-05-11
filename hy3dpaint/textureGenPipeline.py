@@ -25,7 +25,20 @@ from utils.multiview_utils import multiviewDiffusionNet
 from utils.pipeline_utils import ViewProcessor
 from utils.image_super_utils import imageSuperNet
 from utils.uvwrap_utils import mesh_uv_wrap
-from DifferentiableRenderer.mesh_utils import convert_obj_to_glb
+try:
+    from DifferentiableRenderer.mesh_utils import convert_obj_to_glb as _convert_obj_to_glb_bpy
+except Exception as _e:
+    _convert_obj_to_glb_bpy = None
+    print(f"[hy3d] bpy unavailable ({_e.__class__.__name__}); using trimesh fallback for OBJ->GLB.")
+
+def convert_obj_to_glb(obj_path, glb_path):
+    """Convert OBJ to GLB using bpy when available, trimesh otherwise."""
+    if _convert_obj_to_glb_bpy is not None:
+        return _convert_obj_to_glb_bpy(obj_path, glb_path)
+    mesh = trimesh.load(obj_path, force="mesh", process=False)
+    mesh.export(glb_path)
+    return glb_path
+
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -33,10 +46,17 @@ from diffusers.utils import logging as diffusers_logging
 
 diffusers_logging.set_verbosity(50)
 
+try:
+    from utils.device_utils import normalize_device, safe_cuda_empty_cache, cpu_fp32_guard
+except Exception:
+    from hy3dpaint.utils.device_utils import normalize_device, safe_cuda_empty_cache, cpu_fp32_guard
+
 
 class Hunyuan3DPaintConfig:
-    def __init__(self, max_num_view, resolution):
-        self.device = "cuda"
+    def __init__(self, max_num_view, resolution, device=None):
+        # normalize_device is the only place device strings are matched;
+        # mps -> cpu (rasterizer has no MPS kernel), cuda -> cuda, else cpu.
+        self.device = normalize_device(device)
 
         self.multiview_cfg_path = "hy3dpaint/cfgs/hunyuan-paint-pbr.yaml"
         self.custom_pipeline = "hunyuanpaintpbr"
@@ -79,19 +99,32 @@ class Hunyuan3DPaintPipeline:
             texture_size=self.config.texture_size,
             bake_mode=self.config.bake_mode,
             raster_mode=self.config.raster_mode,
+            device=str(self.config.device),
         )
         self.view_processor = ViewProcessor(self.config, self.render)
         self.load_models()
 
     def load_models(self):
-        torch.cuda.empty_cache()
+        safe_cuda_empty_cache()
         self.models["super_model"] = imageSuperNet(self.config)
         self.models["multiview_model"] = multiviewDiffusionNet(self.config)
+        # On CPU compatibility path force fp32 so fp16 autocast doesn't sneak in.
+        if self.config.device.type == "cpu":
+            for m in self.models.values():
+                if hasattr(m, "to"):
+                    try:
+                        m.to(dtype=torch.float32)
+                    except Exception:
+                        pass
         print("Models Loaded.")
 
     @torch.no_grad()
     def __call__(self, mesh_path=None, image_path=None, output_mesh_path=None, use_remesh=True, save_glb=True):
         """Generate texture for 3D mesh using multiview diffusion"""
+        with cpu_fp32_guard(self.config.device):
+            return self._call_impl(mesh_path, image_path, output_mesh_path, use_remesh, save_glb)
+
+    def _call_impl(self, mesh_path, image_path, output_mesh_path, use_remesh, save_glb):
         # Ensure image_prompt is a list
         if isinstance(image_path, str):
             image_prompt = Image.open(image_path)

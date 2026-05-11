@@ -30,9 +30,9 @@ basicsr==1.4.2
 
 # 3D Mesh Processing
 trimesh==4.4.7
-pymeshlab==2022.2.post3
+pymeshlab>=2023.12          # 2022.x never released for Python 3.11
 pygltflib==1.16.3
-xatlas==0.0.9
+xatlas==0.0.9    # install with: CMAKE_ARGS="-DCMAKE_POLICY_VERSION_MINIMUM=3.5" pip install xatlas==0.0.9
 open3d==0.18.0
 
 # Configuration Management
@@ -49,8 +49,8 @@ uvicorn==0.34.3
 tqdm==4.66.5
 psutil==6.0.0
 
-# GPU Computing (requires CUDA)
-cupy-cuda12x==13.4.1
+# GPU Computing (requires CUDA — skip on macOS/CPU builds)
+# cupy-cuda12x==13.4.1
 
 # Blender
 # bpy==4.0

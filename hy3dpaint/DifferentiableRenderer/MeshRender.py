@@ -334,14 +334,14 @@ class MeshRender:
         raster_mode="cr",
         shader_type="face",
         use_opengl=False,
-        device="cuda",
+        device="cpu",
     ):
         """
         Initialize mesh renderer with configurable parameters.
-        
+
         Args:
             camera_distance: Distance from camera to object center
-            camera_type: Type of camera projection ("orth" or "perspective") 
+            camera_type: Type of camera projection ("orth" or "perspective")
             default_resolution: Default rendering resolution
             texture_size: Size of texture maps
             use_antialias: Whether to use antialiasing
@@ -351,7 +351,7 @@ class MeshRender:
             raster_mode: Rasterization backend ("cr" for custom rasterizer)
             shader_type: Shading type ("face" or "vertex")
             use_opengl: Whether to use OpenGL backend (deprecated)
-            device: Computing device ("cuda" or "cpu")
+            device: Computing device ("cuda", "cpu", etc.)
         """
 
         self.device = device

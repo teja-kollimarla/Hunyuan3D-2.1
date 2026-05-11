@@ -395,7 +395,7 @@ def generation_all(
                                                          height=HTML_HEIGHT, 
                                                          width=HTML_WIDTH, textured=True)
     if args.low_vram_mode:
-        torch.cuda.empty_cache()
+        safe_cuda_empty_cache()
     return (
         gr.update(value=path),
         gr.update(value=glb_path_textured),
@@ -442,7 +442,7 @@ def shape_generation(
     path = export_mesh(mesh, save_folder, textured=False)
     model_viewer_html = build_model_viewer_html(save_folder, height=HTML_HEIGHT, width=HTML_WIDTH)
     if args.low_vram_mode:
-        torch.cuda.empty_cache()
+        safe_cuda_empty_cache()
     return (
         gr.update(value=path),
         model_viewer_html,
@@ -739,7 +739,9 @@ if __name__ == '__main__':
     parser.add_argument("--texgen_model_path", type=str, default='tencent/Hunyuan3D-2.1')
     parser.add_argument('--port', type=int, default=8080)
     parser.add_argument('--host', type=str, default='0.0.0.0')
-    parser.add_argument('--device', type=str, default='cuda')
+    parser.add_argument('--device', type=str, default='auto',
+                        help='auto | cuda | cuda:N | mps | cpu. '
+                             'auto = CUDA if available, MPS on Apple Silicon, else CPU.')
     parser.add_argument('--mc_algo', type=str, default='mc')
     parser.add_argument('--cache-path', type=str, default='./save_dir')
     parser.add_argument('--enable_t23d', action='store_true')
@@ -748,7 +750,15 @@ if __name__ == '__main__':
     parser.add_argument('--compile', action='store_true')
     parser.add_argument('--low_vram_mode', action='store_true')
     args = parser.parse_args()
-    
+
+    # Two-device routing:
+    #   SHAPE_DEVICE — shape diffusion (MPS-capable with PYTORCH_ENABLE_MPS_FALLBACK=1)
+    #   PAINT_DEVICE — texture pipeline (always CPU for non-CUDA; rasterizer has no MPS kernel)
+    from hy3dpaint.utils.device_utils import normalize_device, normalize_shape_device, safe_cuda_empty_cache
+    SHAPE_DEVICE = normalize_shape_device(args.device)
+    PAINT_DEVICE = normalize_device(args.device)
+    print(f"[hy3d] shape device: {SHAPE_DEVICE} | paint device: {PAINT_DEVICE}")
+
     SAVE_DIR = args.cache_path
     os.makedirs(SAVE_DIR, exist_ok=True)
 
@@ -796,7 +806,7 @@ if __name__ == '__main__':
             #     texgen_worker.enable_model_cpu_offload()
 
             from hy3dpaint.textureGenPipeline import Hunyuan3DPaintPipeline, Hunyuan3DPaintConfig
-            conf = Hunyuan3DPaintConfig(max_num_view=8, resolution=768)
+            conf = Hunyuan3DPaintConfig(max_num_view=8, resolution=768, device=PAINT_DEVICE)
             conf.realesrgan_ckpt_path = "hy3dpaint/ckpt/RealESRGAN_x4plus.pth"
             conf.multiview_cfg_path = "hy3dpaint/cfgs/hunyuan-paint-pbr.yaml"
             conf.custom_pipeline = "hy3dpaint/hunyuanpaintpbr"
@@ -836,10 +846,10 @@ if __name__ == '__main__':
         args.model_path,
         subfolder=args.subfolder,
         use_safetensors=False,
-        device=args.device,
+        device=str(SHAPE_DEVICE),
     )
     if args.enable_flashvdm:
-        mc_algo = 'mc' if args.device in ['cpu', 'mps'] else args.mc_algo
+        mc_algo = 'mc' if SHAPE_DEVICE.type != 'cuda' else args.mc_algo
         i23d_worker.enable_flashvdm(mc_algo=mc_algo)
     if args.compile:
         i23d_worker.compile()
@@ -859,7 +869,7 @@ if __name__ == '__main__':
     shutil.copytree('./assets/env_maps', os.path.join(static_dir, 'env_maps'), dirs_exist_ok=True)
 
     if args.low_vram_mode:
-        torch.cuda.empty_cache()
+        safe_cuda_empty_cache()
     demo = build_app()
     app = gr.mount_gradio_app(app, demo, path="/")
     uvicorn.run(app, host=args.host, port=args.port)
