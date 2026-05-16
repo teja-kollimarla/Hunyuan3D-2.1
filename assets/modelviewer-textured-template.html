@@ -94,12 +94,12 @@
     document.addEventListener('DOMContentLoaded', () => {
         modelViewer = document.getElementById('modelviewer');
         
-        // 等待模型加载完成
+        // Wait for the model to finish loading
         modelViewer.addEventListener('load', () => {
             console.log('Model loaded, materials available:', modelViewer.model.materials.length);
             window_state.isModelLoaded = true;
             
-            // 调试：打印材质信息
+            // Debug: print material info
             modelViewer.model.materials.forEach((mat, idx) => {
                 console.log(`Material ${idx}:`, {
                     name: mat.name,
@@ -143,7 +143,7 @@
                 roughnessFactor: null
             };
             
-            // 保存纹理引用
+            // Save texture references
             try {
                 if (pbr.baseColorTexture && pbr.baseColorTexture.texture) {
                     materialState.baseColorTexture = pbr.baseColorTexture.texture;
@@ -158,7 +158,7 @@
                     console.log(`Saved normalTexture for material ${i}`);
                 }
                 
-                // 保存材质参数
+                // Save material parameters
                 materialState.baseColorFactor = [...pbr.baseColorFactor];
                 materialState.metallicFactor = pbr.metallicFactor;
                 materialState.roughnessFactor = pbr.roughnessFactor;
@@ -187,15 +187,15 @@
         appearanceButton.classList.remove('checked');
         geometryButton.classList.add('checked');
         
-        // 如果已经隐藏，直接返回
+        // Already hidden — return early
         if (window_state.isHidden) return;
         
-        // 第一次隐藏时保存状态
+        // Save state on first hide
         if (!window_state.savedMaterials) {
             if (!saveMaterialsState()) return;
         }
         
-        // 隐藏所有纹理
+        // Hide all textures
         try {
             for (let i = 0; i < modelViewer.model.materials.length; i++) {
                 const material = modelViewer.model.materials[i];
@@ -235,23 +235,23 @@
         appearanceButton.classList.add('checked');
         geometryButton.classList.remove('checked');
         
-        // 如果不在隐藏状态，直接返回
+        // Not hidden — return early
         if (!window_state.isHidden) return;
         
-        // 如果没有保存的材质状态，无法恢复
+        // Cannot restore without a saved material state
         if (!window_state.savedMaterials) {
             console.warn('No saved materials to restore');
             return;
         }
         
-        // 恢复纹理
+        // Restore textures
         try {
             for (let i = 0; i < modelViewer.model.materials.length && i < window_state.savedMaterials.length; i++) {
                 const material = modelViewer.model.materials[i];
                 const pbr = material.pbrMetallicRoughness;
                 const savedMaterial = window_state.savedMaterials[i];
                 
-                // 恢复纹理
+                // Restore textures
                 if (savedMaterial.baseColorTexture && pbr.baseColorTexture) {
                     pbr.baseColorTexture.setTexture(savedMaterial.baseColorTexture);
                     console.log(`Restored baseColorTexture for material ${i}`);
@@ -265,7 +265,7 @@
                     console.log(`Restored normalTexture for material ${i}`);
                 }
                 
-                // 恢复材质参数
+                // Restore material parameters
                 if (savedMaterial.baseColorFactor) {
                     pbr.setBaseColorFactor(savedMaterial.baseColorFactor);
                 }
@@ -277,7 +277,7 @@
                 }
             }
             
-            // 恢复环境设置
+            // Restore environment settings
             modelViewer.environmentImage = '/static/env_maps/white.jpg';
             if (window_state.savedExposure !== undefined) {
                 modelViewer.exposure = window_state.savedExposure;
@@ -291,7 +291,7 @@
         }
     }
 
-    // 添加调试函数
+    // Add debug function
     function debugMaterials() {
         if (!ensureModelLoaded()) return;
         
@@ -312,7 +312,7 @@
         console.log('===============================');
     }
 
-    // 暴露调试函数到全局
+    // Expose debug function on the global scope
     window.debugMaterials = debugMaterials;
 
 </script>

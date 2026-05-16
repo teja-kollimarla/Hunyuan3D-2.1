@@ -31,6 +31,29 @@ from .models.autoencoders import ShapeVAE
 from .models.autoencoders import SurfaceExtractors
 from .utils import logger, synchronize_timer, smart_load_model
 
+# Phase 1 — runtime helpers. Imported lazily/best-effort so that this module
+# stays importable on machines without hy3d_runtime on sys.path (the helpers
+# are only invoked when defaults need resolving).
+try:
+    from hy3d_runtime import pick_device as _pick_device, pick_dtype as _pick_dtype
+except ImportError:  # pragma: no cover
+    _pick_device = None
+    _pick_dtype = None
+
+
+def _resolve_device_dtype(device, dtype):
+    """Resolve None defaults via hy3d_runtime, preserving legacy behavior
+    when hy3d_runtime isn't importable."""
+    if _pick_device is None:
+        return ("cuda" if device is None else device,
+                torch.float16 if dtype is None else dtype)
+    resolved_device = _pick_device(device) if device is None else _pick_device(device)
+    resolved_dtype = _pick_dtype(resolved_device) if dtype is None else dtype
+    # On CPU, force fp32 no matter what the caller passed.
+    if isinstance(resolved_device, torch.device) and resolved_device.type == "cpu":
+        resolved_dtype = torch.float32
+    return resolved_device, resolved_dtype
+
 
 def retrieve_timesteps(
     scheduler,
@@ -137,11 +160,13 @@ class Hunyuan3DDiTPipeline:
         cls,
         ckpt_path,
         config_path,
-        device='cuda',
-        dtype=torch.float16,
+        device=None,
+        dtype=None,
         use_safetensors=None,
+        mmap_weights=False,
         **kwargs,
     ):
+        device, dtype = _resolve_device_dtype(device, dtype)
         # load config
         with open(config_path, 'r') as f:
             config = yaml.safe_load(f)
@@ -154,9 +179,25 @@ class Hunyuan3DDiTPipeline:
         logger.info(f"Loading model from {ckpt_path}")
 
         if use_safetensors:
-            # parse safetensors
-            import safetensors.torch
-            safetensors_ckpt = safetensors.torch.load_file(ckpt_path, device='cpu')
+            # parse safetensors. Phase 2: opt into mmap loader when caller
+            # passes mmap_weights=True and target device is CPU. The mmap
+            # path returns views into the file and avoids a bulk RAM copy
+            # of the full 24 GB checkpoint at load time.
+            cpu_target = isinstance(device, torch.device) and device.type == "cpu"
+            if mmap_weights and cpu_target:
+                try:
+                    from hy3d_runtime import load_safetensors_mmap
+                    safetensors_ckpt = load_safetensors_mmap(ckpt_path, device='cpu')
+                    logger.info("safetensors loaded via mmap")
+                except Exception as _e:
+                    logger.warning(
+                        f"mmap loader failed ({_e}); falling back to bulk load"
+                    )
+                    import safetensors.torch
+                    safetensors_ckpt = safetensors.torch.load_file(ckpt_path, device='cpu')
+            else:
+                import safetensors.torch
+                safetensors_ckpt = safetensors.torch.load_file(ckpt_path, device='cpu')
             ckpt = {}
             for key, value in safetensors_ckpt.items():
                 model_name = key.split('.')[0]
@@ -196,13 +237,15 @@ class Hunyuan3DDiTPipeline:
     def from_pretrained(
         cls,
         model_path,
-        device='cuda',
-        dtype=torch.float16,
+        device=None,
+        dtype=None,
         use_safetensors=False,
         variant='fp16',
         subfolder='hunyuan3d-dit-v2-1',
+        mmap_weights=False,
         **kwargs,
     ):
+        device, dtype = _resolve_device_dtype(device, dtype)
         kwargs['from_pretrained_kwargs'] = dict(
             model_path=model_path,
             subfolder=subfolder,
@@ -223,6 +266,7 @@ class Hunyuan3DDiTPipeline:
             device=device,
             dtype=dtype,
             use_safetensors=use_safetensors,
+            mmap_weights=mmap_weights,
             **kwargs
         )
 
@@ -233,10 +277,11 @@ class Hunyuan3DDiTPipeline:
         scheduler,
         conditioner,
         image_processor,
-        device='cuda',
-        dtype=torch.float16,
+        device=None,
+        dtype=None,
         **kwargs
     ):
+        device, dtype = _resolve_device_dtype(device, dtype)
         self.vae = vae
         self.model = model
         self.scheduler = scheduler

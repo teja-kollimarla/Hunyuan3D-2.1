@@ -20,6 +20,22 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 from typing import Any, Callable, Dict, List, Optional, Union, Tuple, Literal
+
+try:
+    from hy3d_runtime import pick_dtype
+except ImportError:  # pragma: no cover
+    import sys as _sys, os as _os
+    _sys.path.insert(0, _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..", "..", "..")))
+    from hy3d_runtime import pick_dtype
+
+
+def _half_or_fp32(tensor: torch.Tensor) -> torch.Tensor:
+    """Cast to half on CUDA, fp32 on CPU.
+
+    Replaces the bare .half() calls that crashed on CPU and were poor
+    performance on CPU even when they didn't crash.
+    """
+    return tensor.to(dtype=pick_dtype(tensor.device, want="fp16"))
 import diffusers
 from diffusers.utils import deprecate
 from diffusers import (
@@ -134,7 +150,7 @@ def compute_voxel_grid_mask(position, grid_resolution=8):
         torch.Tensor: Attention mask [B, N*grid_res**2, N*grid_res**2]
     """
 
-    position = position.half()
+    position = _half_or_fp32(position)
     B, N, _, H, W = position.shape
     assert H % grid_resolution == 0 and W % grid_resolution == 0
 
@@ -164,11 +180,11 @@ def compute_voxel_grid_mask(position, grid_resolution=8):
     grid_position = grid_position.permute(0, 1, 4, 2, 3)
     grid_position = rearrange(grid_position, "b n c h w -> b n (h w) c")
 
-    grid_position_expanded_1 = grid_position.unsqueeze(2).unsqueeze(4)  # 形状变为 B, N, 1, L, 1, 3
-    grid_position_expanded_2 = grid_position.unsqueeze(1).unsqueeze(3)  # 形状变为 B, 1, N, 1, L, 3
+    grid_position_expanded_1 = grid_position.unsqueeze(2).unsqueeze(4)  # shape becomes B, N, 1, L, 1, 3
+    grid_position_expanded_2 = grid_position.unsqueeze(1).unsqueeze(3)  # shape becomes B, 1, N, 1, L, 3
 
-    # 计算欧氏距离
-    distances = torch.norm(grid_position_expanded_1 - grid_position_expanded_2, dim=-1)  # 形状为 B, N, N, L, L
+    # Compute Euclidean distances
+    distances = torch.norm(grid_position_expanded_1 - grid_position_expanded_2, dim=-1)  # shape is B, N, N, L, L
 
     weights = distances
     grid_distance = 1.73 / grid_resolution
@@ -216,7 +232,7 @@ def compute_discrete_voxel_indice(position, grid_resolution=8, voxel_resolution=
         torch.Tensor: Voxel indices [B, N, grid_res, grid_res, 3]
     """
 
-    position = position.half()
+    position = _half_or_fp32(position)
     B, N, _, H, W = position.shape
     assert H % grid_resolution == 0 and W % grid_resolution == 0
 

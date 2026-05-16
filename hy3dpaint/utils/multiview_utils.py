@@ -23,10 +23,22 @@ from omegaconf import OmegaConf
 from diffusers import DiffusionPipeline
 from diffusers import EulerAncestralDiscreteScheduler, DDIMScheduler, UniPCMultistepScheduler
 
+try:
+    from hy3d_runtime import pick_dtype, pick_device
+except ImportError:  # pragma: no cover
+    import sys as _sys, os as _os
+    _sys.path.insert(0, _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..", "..")))
+    from hy3d_runtime import pick_dtype, pick_device
+
 
 class multiviewDiffusionNet:
     def __init__(self, config) -> None:
+        # Accept either str or torch.device. Resolve via pick_device for the
+        # 'auto' case and for None.
         self.device = config.device
+        # Resolved dtype follows the runtime rule (CPU => fp32; CUDA => fp16
+        # to match the existing multiview pipeline's training precision).
+        self._dtype = pick_dtype(self.device, want="fp16")
 
         cfg_path = config.multiview_cfg_path
         custom_pipeline = os.path.join(os.path.dirname(__file__),"..","hunyuanpaintpbr")
@@ -42,8 +54,8 @@ class multiviewDiffusionNet:
         model_path = os.path.join(model_path, "hunyuan3d-paintpbr-v2-1")
         pipeline = DiffusionPipeline.from_pretrained(
             model_path,
-            custom_pipeline=custom_pipeline, 
-            torch_dtype=torch.float16
+            custom_pipeline=custom_pipeline,
+            torch_dtype=self._dtype,
         )
 
         pipeline.scheduler = UniPCMultistepScheduler.from_config(pipeline.scheduler.config, timestep_spacing="trailing")
@@ -54,7 +66,7 @@ class multiviewDiffusionNet:
 
         if hasattr(self.pipeline.unet, "use_dino") and self.pipeline.unet.use_dino:
             from hunyuanpaintpbr.unet.modules import Dino_v2
-            self.dino_v2 = Dino_v2(config.dino_ckpt_path).to(torch.float16)
+            self.dino_v2 = Dino_v2(config.dino_ckpt_path).to(self._dtype)
             self.dino_v2 = self.dino_v2.to(self.device)
 
     def seed_everything(self, seed):

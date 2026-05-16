@@ -40,6 +40,10 @@ from constants import (
     API_VERSION, API_CONTACT, API_LICENSE_INFO, API_TAGS_METADATA
 )
 from model_worker import ModelWorker
+from hy3d_runtime import (
+    InputLimitExceeded, LOW_VRAM_CHOICES, normalize_low_vram,
+    StageDoesNotFit, OOMError,
+)
 
 # Global variables
 SAVE_DIR = DEFAULT_SAVE_DIR
@@ -90,6 +94,37 @@ async def generate_3d_model(request: GenerationRequest):
     try:
         file_path, uid = worker.generate(uid, params)
         return FileResponse(file_path)
+    except StageDoesNotFit as e:
+        # HTTP 507 Insufficient Storage — permanent capacity mismatch.
+        # 503 implies retry-later; this is a "you need more VRAM" error.
+        logger.error(f"StageDoesNotFit: {e}")
+        return JSONResponse(e.to_dict(), status_code=507)
+    except OOMError as e:
+        logger.error(f"OOMError: {e}")
+        return JSONResponse(
+            {"error": "OOMError", "message": str(e)},
+            status_code=503,
+        )
+    except InputLimitExceeded as e:
+        # 413 for size-based caps, 422 for content/shape caps. The
+        # distinction matters to clients that retry on 422 but not on 413.
+        is_size_limit = e.limit_name in (
+            "max_input_image_bytes",
+            "max_input_mesh_vertices",
+            "max_input_mesh_faces",
+        )
+        status_code = 413 if is_size_limit else 422
+        logger.warning(f"Input limit exceeded: {e}")
+        return JSONResponse(
+            {
+                "error": "InputLimitExceeded",
+                "limit_name": e.limit_name,
+                "observed": e.observed,
+                "allowed": e.allowed,
+                "message": str(e),
+            },
+            status_code=status_code,
+        )
     except ValueError as e:
         traceback.print_exc()
         logger.error(f"Caught ValueError: {e}")
@@ -198,30 +233,92 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8081)
     parser.add_argument("--model_path", type=str, default='tencent/Hunyuan3D-2.1')
     parser.add_argument("--subfolder", type=str, default='hunyuan3d-dit-v2-1')
-    parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--device", type=str, default="auto",
+                        help="Device to run on. 'auto' picks largest-VRAM CUDA or CPU.")
     parser.add_argument('--mc_algo', type=str, default='mc')
     parser.add_argument("--limit-model-concurrency", type=int, default=5)
     parser.add_argument('--enable_flashvdm', action='store_true')
     parser.add_argument('--compile', action='store_true')
-    parser.add_argument('--low_vram_mode', action='store_true')
+    parser.add_argument(
+        '--low_vram_mode',
+        nargs='?',
+        const='conservative',
+        default='off',
+        choices=list(LOW_VRAM_CHOICES),
+        help=("Memory-conservation level. --low_vram_mode alone implies "
+              "'conservative'."),
+    )
+    parser.add_argument(
+        '--mmap-weights', action='store_true',
+        help="Memory-map safetensors weights (CPU loads only).",
+    )
+    parser.add_argument(
+        '--profile', type=str, default='auto',
+        choices=['auto', 'draft', 'standard', 'high', 'ultra', 'custom'],
+        help="MeshBudget profile. 'auto' is cluster-aware; 'custom' honors "
+             "per-request octree_resolution/num_chunks/face_count.",
+    )
+    parser.add_argument(
+        '--enable-disk-offload', action='store_true',
+        help="Opt in to disk offload tier in WeightManager. WARNING: adds "
+             "1-5s (NVMe) or 10-30s (HDD) per layer swap. Recommended only "
+             "when CPU RAM is also constrained.",
+    )
+    parser.add_argument(
+        '--disk-offload-dir', type=str, default=None,
+        help="Directory for disk-offloaded tensors. Default: "
+             "~/.cache/hy3d_runtime/disk_offload/",
+    )
+    parser.add_argument(
+        '--prefer-disk-offload', action='store_true',
+        help="With --enable-disk-offload, pre-demote inactive stages to disk "
+             "at startup. Frees VRAM proactively at the cost of swap latency.",
+    )
     parser.add_argument('--cache-path', type=str, default='./gradio_cache')
     args = parser.parse_args()
     logger.info(f"args: {args}")
 
+    # Phase 6: opt-in disk offload startup warning. Stitched into RuntimeConfig
+    # via env so the worker picks it up.
+    if getattr(args, "enable_disk_offload", False):
+        os.environ["HY3D_ENABLE_DISK_OFFLOAD"] = "1"
+        if getattr(args, "disk_offload_dir", None):
+            os.environ["HY3D_DISK_OFFLOAD_DIR"] = str(args.disk_offload_dir)
+        if getattr(args, "prefer_disk_offload", False):
+            os.environ["HY3D_PREFER_DISK_OFFLOAD"] = "1"
+        logger.warning(
+            "Disk offload enabled. Layer swaps will add 1-5s (NVMe) or "
+            "10-30s (HDD) per stage. Recommended only when CPU RAM is also "
+            "constrained. Offload dir: %s",
+            args.disk_offload_dir or "~/.cache/hy3d_runtime/disk_offload/",
+        )
+
+    # Plan §E (process-local WeightManager): refuse multi-worker deployment.
+    workers_env = os.environ.get("WEB_CONCURRENCY") or os.environ.get("UVICORN_WORKERS")
+    if workers_env and int(workers_env) > 1:
+        logger.error(
+            "WeightManager is process-local. Refusing to launch with "
+            "WEB_CONCURRENCY/UVICORN_WORKERS=%s. Use one process per GPU "
+            "behind a load balancer instead.",
+            workers_env,
+        )
+        raise SystemExit(1)
+
     # Update SAVE_DIR based on cache-path argument
     SAVE_DIR = args.cache_path
     os.makedirs(SAVE_DIR, exist_ok=True)
-    
+
 
     model_semaphore = asyncio.Semaphore(args.limit_model_concurrency)
 
     worker = ModelWorker(
-        model_path=args.model_path, 
+        model_path=args.model_path,
         subfolder=args.subfolder,
-        device=args.device, 
+        device=args.device,
         low_vram_mode=args.low_vram_mode,
         worker_id=worker_id,
         model_semaphore=model_semaphore,
+        mmap_weights=getattr(args, "mmap_weights", False),
         save_dir=SAVE_DIR,
         mc_algo=args.mc_algo,
         enable_flashvdm=args.enable_flashvdm,

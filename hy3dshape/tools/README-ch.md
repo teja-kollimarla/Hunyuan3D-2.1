@@ -1,94 +1,94 @@
-# 数据处理
+# Data processing
 
-这是用于3D形状和纹理生成的数据处理流程。
+This is the data-processing pipeline for 3D shape and texture generation.
 
-**注意事项**：
-1. 该实现是我们工业流程的简化版本。
-2. 渲染脚本基于[TRELLIS](https://github.com/microsoft/TRELLIS/blob/main/dataset_toolkits/blender_script/render.py)。
+**Notes**:
+1. This implementation is a simplified version of our industrial pipeline.
+2. The rendering script is based on [TRELLIS](https://github.com/microsoft/TRELLIS/blob/main/dataset_toolkits/blender_script/render.py).
 
-## 渲染
+## Rendering
 
-### 动机
-渲染脚本`render/render.py`主要有三个目的：
-1. 使用Blender将复杂的3D格式转换为PLY文件，以便进行进一步处理。
-2. 为DiT训练渲染条件图像。
-3. 渲染正交图像、PBR材质以及用于纹理生成的条件信号（世界空间法线和位置）。
+### Motivation
+The rendering script `render/render.py` has three main purposes:
+1. Use Blender to convert complex 3D formats into PLY files for further processing.
+2. Render conditional images for DiT training.
+3. Render orthographic images, PBR materials, and conditional signals (world-space normals and positions) for texture generation.
 
-### 需求
-渲染脚本使用Blender 4.1执行。你需要使用Blender的Python安装`opencv`、`OpenEXR`和`Imath`。以下是Macbook上的示例：
+### Requirements
+The rendering script runs under Blender 4.1. You need to install `opencv`, `OpenEXR`, and `Imath` using Blender's bundled Python. Example on macOS:
 ```bash
 /Applications/Blender.app/Contents/Resources/4.1/python/bin/python3.11 -m pip install OpenEXR Imath opencv-python
 ```
 
-### 执行
-前两个目的可以通过以下单一命令执行：
+### Execution
+The first two purposes can be accomplished with a single command:
 ```bash
 $BLENDER_PATH -b -P render/render.py -- \
     --object ${INPUT_FILE} --geo_mode --resolution 512 \
     --output_folder $OUTPUT_FOLDER
 ```
-对于第三个目的，只需移除`--geo_mode`标志。
+For the third purpose, simply drop the `--geo_mode` flag.
 
-## 水密网格处理和采样
+## Watertight mesh processing and sampling
 
-### 动机
-为了学习3DShape2VecSets的SDF表示，我们需要一个水密输入网格。该流程处理原始三角网格，生成三种必要的数据类型：
-1. **表面采样** - 编码器的输入点。
-2. **体积采样** - 解码器中SDF评估的查询点。
-3. **体积SDFs** - VAE训练的地面真实有符号距离值。
+### Motivation
+To learn the SDF representation used by 3DShape2VecSets, we need a watertight input mesh. This pipeline takes a raw triangle mesh and produces three required data types:
+1. **Surface samples** — input points for the encoder.
+2. **Volume samples** — query points for SDF evaluation in the decoder.
+3. **Volume SDFs** — ground-truth signed-distance values for VAE training.
 
-### 执行
-处理三角网格（OBJ/OFF格式），生成以下内容：
-1. 水密网格（`${OUTPUT_NAME}_watertight.obj`）。
-2. 表面点采样（`${OUTPUT_NAME}_surface.npz`）。
-3. 带有SDF的体积采样（`${OUTPUT_NAME}_sdf.npz`）。
+### Execution
+Given a triangle mesh (OBJ/OFF), this produces:
+1. A watertight mesh (`${OUTPUT_NAME}_watertight.obj`).
+2. Surface-point samples (`${OUTPUT_NAME}_surface.npz`).
+3. Volume samples with SDFs (`${OUTPUT_NAME}_sdf.npz`).
 
-**命令：**
+**Command:**
 ```bash
 python3 watertight/watertight_and_sample.py \
     --input_obj ${INPUT_MESH} \
     --output_prefix ${OUTPUT_NAME}
 ```
 
-### 输出数据格式
+### Output data format
 
-#### 1. 表面采样（`${OUTPUT_NAME}_surface.npz`）
-包含两个点云数组，以numpy NPZ格式存储：
+#### 1. Surface samples (`${OUTPUT_NAME}_surface.npz`)
+Contains two point-cloud arrays stored in numpy NPZ format:
 
-| 键             | 形状    | 格式   | 描述                     |
-|-----------------|----------|----------|---------------------------------|
-| `random_surface` | `(N, 6)` | `float16`| 表面上的均匀点采样 |
-| `sharp_surface`  | `(M, 6)` | `float16`| 靠近网格锐边的采样   |
+| Key              | Shape    | Dtype     | Description                                |
+|------------------|----------|-----------|--------------------------------------------|
+| `random_surface` | `(N, 6)` | `float16` | Uniform point samples on the surface       |
+| `sharp_surface`  | `(M, 6)` | `float16` | Samples near sharp edges of the mesh       |
 
-#### 2. 体积SDF采样（`${OUTPUT_NAME}_sdf.npz`）
-包含三种采样类型，以数组对的形式存储。对于每种类型`${type}`：
+#### 2. Volume SDF samples (`${OUTPUT_NAME}_sdf.npz`)
+Contains three sample types stored as point/label array pairs. For each type `${type}`:
 
-| 采样类型     | 点数组         | SDF标签数组     | 形状    | 格式   | 描述             |
-|-----------------|----------------------|----------------------|----------|----------|-------------------------|
-| `vol`          | `vol_points`        | `vol_label`         | `(P, 3)/(P,)` | `float16`| 随机空间采样 |
-| `random_near`   | `random_near_points` | `random_near_label`  | `(Q, 3)/(Q,)` | `float16`| 靠近表面的采样   |
-| `sharp_near`    | `sharp_near_points`  | `sharp_near_label`   | `(R, 3)/(R,)` | `float16`| 靠近锐边的采样 |
+| Sample type    | Points array          | SDF label array        | Shape           | Dtype     | Description                       |
+|----------------|-----------------------|------------------------|-----------------|-----------|-----------------------------------|
+| `vol`          | `vol_points`          | `vol_label`            | `(P, 3)/(P,)`   | `float16` | Uniform samples in volume         |
+| `random_near`  | `random_near_points`  | `random_near_label`    | `(Q, 3)/(Q,)`   | `float16` | Samples close to the surface      |
+| `sharp_near`   | `sharp_near_points`   | `sharp_near_label`     | `(R, 3)/(R,)`   | `float16` | Samples close to sharp edges      |
 
-**数据规格**：
-- 所有点坐标（`*_points`数组）包含以`float16`值存储的3D位置。
-- 所有SDF值（`*_label`数组）是表示以下内容的`float16`标量：
-  - **正值**：在表面外。
-  - **负值**：在表面内。
-  - **零值**：在表面上。
-- 数组维度：
-  - `N`、`M`、`P`、`Q`、`R`表示采样数量（因形状而异）。
-  - `3`表示XYZ坐标。
-  - `6`表示XYZ/法线坐标。
-- 所有数组均以未压缩形式存储在numpy的NPZ格式中。
+**Data specifications**:
+- All point coordinates (`*_points` arrays) contain 3D positions stored as `float16`.
+- All SDF values (`*_label` arrays) are `float16` scalars where:
+  - **Positive** — outside the surface.
+  - **Negative** — inside the surface.
+  - **Zero** — on the surface.
+- Array dimensions:
+  - `N`, `M`, `P`, `Q`, `R` are sample counts (vary per shape).
+  - `3` is for XYZ coordinates.
+  - `6` is for XYZ + normal coordinates.
+- All arrays are stored uncompressed in numpy's NPZ format.
 
-## 整体脚本
-修改pipeline.sh里面这4个变量，
-1. **INPUT_FILE** 每个3D数据的路径。
-2. **OUTPUT_FOLDER** 输出数据集的总路径。
-3. **NAME** 每个数据的输出路径命名。
-4. **BLENDER_PATH** Blender可执行路径。
+## Overall pipeline script
+Edit these four variables in `pipeline.sh`:
+1. **INPUT_FILE** — path to each 3D source asset.
+2. **OUTPUT_FOLDER** — root path for the output dataset.
+3. **NAME** — output naming for each data point.
+4. **BLENDER_PATH** — path to the Blender executable.
 
-然后运行以下脚本：
+Then run:
 ```bash
 bash pipeline.sh
 ```

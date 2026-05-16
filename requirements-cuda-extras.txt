@@ -1,0 +1,8 @@
+# Optional CUDA extras for Hunyuan3D-2.1
+#
+# These packages are not imported by any .py file in this repo, but were
+# historically pinned in the base requirements.txt. They are kept here for
+# operators who want them installed; the base install no longer pulls them in
+# so that CPU-mode and non-CUDA12 environments don't fail at install time.
+
+cupy-cuda12x==13.4.1

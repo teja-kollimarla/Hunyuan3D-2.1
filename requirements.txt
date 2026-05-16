@@ -49,8 +49,8 @@ uvicorn==0.34.3
 tqdm==4.66.5
 psutil==6.0.0
 
-# GPU Computing (requires CUDA)
-cupy-cuda12x==13.4.1
+# GPU Computing (requires CUDA) — moved to requirements-cuda-extras.txt
+# (cupy is not imported by any .py file in this repo, so it's optional)
 
 # Blender
 # bpy==4.0

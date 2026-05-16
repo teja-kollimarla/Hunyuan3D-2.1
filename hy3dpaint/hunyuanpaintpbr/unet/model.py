@@ -23,6 +23,22 @@ import pytorch_lightning as pl
 from tqdm import tqdm
 from torchvision.transforms import v2
 from torchvision.utils import make_grid, save_image
+
+try:
+    from hy3d_runtime import pick_dtype
+except ImportError:  # pragma: no cover
+    import sys as _sys
+    _sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
+    from hy3d_runtime import pick_dtype
+
+
+def _model_dtype(module: nn.Module):
+    """Pick bf16 on CUDA, fp32 on CPU, based on the module's current device."""
+    try:
+        device = next(module.parameters()).device
+    except StopIteration:
+        device = torch.device("cpu")
+    return pick_dtype(device, want="bf16")
 from einops import rearrange
 
 from diffusers import (
@@ -103,7 +119,7 @@ class HunyuanPaint(pl.LightningModule):
         pipeline.set_learned_parameters()
 
         if control_net_config is not None:
-            pipeline.unet = pipeline.unet.bfloat16().requires_grad_(control_net_config.train_unet)
+            pipeline.unet = pipeline.unet.to(_model_dtype(pipeline.unet)).requires_grad_(control_net_config.train_unet)
             self.pipeline.add_controlnet(
                 ControlNetModel.from_pretrained(control_net_config.pretrained_model_name_or_path),
                 conditioning_scale=0.75,
@@ -112,12 +128,12 @@ class HunyuanPaint(pl.LightningModule):
         self.unet = pipeline.unet
 
         self.pipeline.set_progress_bar_config(disable=True)
-        self.pipeline.vae = self.pipeline.vae.bfloat16()
-        self.pipeline.text_encoder = self.pipeline.text_encoder.bfloat16()
+        self.pipeline.vae = self.pipeline.vae.to(_model_dtype(self.pipeline.vae))
+        self.pipeline.text_encoder = self.pipeline.text_encoder.to(_model_dtype(self.pipeline.text_encoder))
 
         if self.unet.use_dino:
             self.dino_v2 = Dino_v2("facebook/dinov2-giant")
-            self.dino_v2 = self.dino_v2.bfloat16()
+            self.dino_v2 = self.dino_v2.to(_model_dtype(self.dino_v2))
 
         self.validation_step_outputs = []
 

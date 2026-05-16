@@ -56,6 +56,15 @@ class GenerationRequest(BaseModel):
         ge=1000,
         le=100000
     )
+    profile: Optional[str] = Field(
+        "auto",
+        description=(
+            "MeshBudget profile selector. 'auto' chooses cluster-aware based "
+            "on GPU inventory; 'custom' honors the explicit octree_resolution / "
+            "num_chunks / face_count fields. Valid: auto, draft, standard, "
+            "high, ultra, custom."
+        ),
+    )
 
 
 class GenerationResponse(BaseModel):

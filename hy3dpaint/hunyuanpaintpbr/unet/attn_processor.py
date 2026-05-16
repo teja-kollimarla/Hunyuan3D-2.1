@@ -661,7 +661,6 @@ class SelfAttnProcessor2_0(BaseAttnProcessor):
         attention_mask: Optional[torch.Tensor] = None,
         temb: Optional[torch.Tensor] = None,
         token: Literal["albedo", "mr"] = "albedo",
-        multiple_devices=False,
         *args,
         **kwargs,
     ):
@@ -675,21 +674,21 @@ class SelfAttnProcessor2_0(BaseAttnProcessor):
             attention_mask: Optional attention mask tensor
             temb: Optional temporal embedding tensor
             token: PBR material type to process ("albedo", "mr", etc.)
-            multiple_devices: Whether to use multiple GPU devices
-            *args: Additional positional arguments
-            **kwargs: Additional keyword arguments
 
         Returns:
             Processed attention output for the specified PBR material type
+
+        Phase 4: the original code carried a `multiple_devices` parameter that
+        gated a hardcoded cuda:0/cuda:1 split for albedo vs MR. The investigation
+        confirmed: (1) the only caller of this method (`__call__` below)
+        hardcoded `False`, (2) train.py never sets it to True, (3) no other
+        module references it. It was dead code from an unshipped multi-GPU
+        attempt. Removed entirely. Per-token model parallelism would need to
+        be reintroduced via the Orchestrator and is out of scope for this
+        refactor; stage-level routing is the supported multi-GPU model.
         """
         target = attn if token == "albedo" else attn.processor
         token_suffix = "" if token == "albedo" else "_" + token
-
-        # Device management (if needed)
-        if multiple_devices:
-            device = torch.device("cuda:0") if token == "albedo" else torch.device("cuda:1")
-            for attr in [f"to_q{token_suffix}", f"to_k{token_suffix}", f"to_v{token_suffix}", f"to_out{token_suffix}"]:
-                getattr(target, attr).to(device)
 
         def get_qkv(attn, hidden_states, encoder_hidden_states, **kwargs):
             return (
@@ -747,8 +746,11 @@ class SelfAttnProcessor2_0(BaseAttnProcessor):
         # Process each PBR setting
         results = []
         for token, pbr_hs in zip(self.pbr_setting, pbr_hidden_states):
-            processed_hs = rearrange(pbr_hs, "b n_pbrs n l c -> (b n_pbrs n) l c").to("cuda:0")
-            result = self.process_single(attn, processed_hs, None, attention_mask, temb, token, False)
+            # Keep the tensor on whatever device the caller placed it on.
+            # Phase 1 removes the hardcoded cuda:0 that crashed CPU and
+            # multi-GPU setups where cuda:0 isn't the active device.
+            processed_hs = rearrange(pbr_hs, "b n_pbrs n l c -> (b n_pbrs n) l c").to(pbr_hs.device)
+            result = self.process_single(attn, processed_hs, None, attention_mask, temb, token)
             results.append(result)
 
         outputs = [rearrange(result, "(b n_pbrs n) l c -> b n_pbrs n l c", b=B, n_pbrs=1) for result in results]

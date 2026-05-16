@@ -334,7 +334,7 @@ class MeshRender:
         raster_mode="cr",
         shader_type="face",
         use_opengl=False,
-        device="cuda",
+        device=None,
     ):
         """
         Initialize mesh renderer with configurable parameters.
@@ -354,7 +354,18 @@ class MeshRender:
             device: Computing device ("cuda" or "cpu")
         """
 
-        self.device = device
+        # Phase 1: resolve None to the auto-picked device. The literal "cuda"
+        # default crashed CPU systems; the orchestrator (Phase 4) will inject
+        # an explicit device.
+        if device is None:
+            try:
+                from hy3d_runtime import pick_device
+                self.device = str(pick_device())
+            except ImportError:
+                # Fall back to legacy default if hy3d_runtime isn't on the path
+                self.device = "cuda"
+        else:
+            self.device = device
 
         self.set_default_render_resolution(default_resolution)
         self.set_default_texture_resolution(texture_size)
@@ -370,8 +381,26 @@ class MeshRender:
 
         self.raster_mode = raster_mode
         if self.raster_mode == "cr":
-            import custom_rasterizer as cr
-
+            # Phase 3: clean failure on CPU systems and missing/mismatched
+            # builds instead of a confusing kernel-import traceback. CPU mode
+            # in this refactor is shape-only by scope; the custom rasterizer
+            # itself is intentionally not modified. See docs/CPU_MODE.md.
+            try:
+                import custom_rasterizer as cr
+            except ImportError as _e:
+                try:
+                    from hy3d_runtime import RasterizerNotAvailable
+                except ImportError:  # pragma: no cover
+                    import sys as _sys, os as _os
+                    _sys.path.insert(0, _os.path.abspath(
+                        _os.path.join(_os.path.dirname(__file__), "..", "..")
+                    ))
+                    from hy3d_runtime import RasterizerNotAvailable
+                raise RasterizerNotAvailable(
+                    "Texture generation requires CUDA. Use --device cpu for "
+                    "shape-only output (no textures), or run on a CUDA-capable "
+                    "system. Underlying error: " + str(_e)
+                )
             self.raster = cr
         else:
             raise f"No raster named {self.raster_mode}"

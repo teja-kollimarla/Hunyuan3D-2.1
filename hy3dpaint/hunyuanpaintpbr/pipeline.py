@@ -242,7 +242,11 @@ class HunyuanPaintPipeline(StableDiffusionPipeline):
                     if img.shape[2] > 3:
                         alpha = img[:, :, 3:]
                         img = img[:, :, :3] * alpha + bg_c * (1 - alpha)
-                    img = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0).contiguous().half().to("cuda")
+                    # Phase 1: replace hardcoded .half().to("cuda") with the
+                    # UNet's actual device and a CPU-fp32-safe dtype.
+                    _unet_device = self.unet.device
+                    _unet_dtype = next(self.unet.parameters()).dtype if _unet_device.type != "cpu" else torch.float32
+                    img = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0).contiguous().to(dtype=_unet_dtype, device=_unet_device)
                     view_imgs.append(img)
                 view_imgs = torch.cat(view_imgs, dim=0)
                 images_tensor.append(view_imgs.unsqueeze(0))

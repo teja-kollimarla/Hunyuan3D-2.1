@@ -47,6 +47,18 @@ import numpy as np
 
 from hy3dshape.utils import logger
 from hy3dpaint.convert_utils import create_glb_with_pbr_materials
+from hy3d_runtime import (
+    cuda_available,
+    InputLimits,
+    InputLimitExceeded,
+    LOW_VRAM_CHOICES,
+    low_vram_active,
+    low_vram_aggressive,
+    normalize_low_vram,
+)
+
+# Process-wide default limits. Operators can override via the entry point.
+_INPUT_LIMITS = InputLimits.default()
 
 
 MAX_SEED = 1e7
@@ -165,7 +177,7 @@ def export_mesh(mesh, save_folder, textured=False, type='glb'):
 
 
 def quick_convert_with_obj2gltf(obj_path: str, glb_path: str) -> bool:
-    # 执行转换
+    # Run the conversion
     textures = {
         'albedo': obj_path.replace('.obj', '.jpg'),
         'metallic': obj_path.replace('.obj', '_metallic.jpg'),
@@ -244,6 +256,18 @@ def _gen_shape(
             image['left'] = mv_image_left
         if mv_image_right:
             image['right'] = mv_image_right
+
+    # InputLimits validation — fail fast with a clean toast instead of crashing
+    # deep in the pipeline. MV_MODE images go through the same checks.
+    try:
+        if isinstance(image, dict):
+            for v in image.values():
+                if v is not None:
+                    _INPUT_LIMITS.check_image(v)
+        elif image is not None:
+            _INPUT_LIMITS.check_image(image)
+    except InputLimitExceeded as e:
+        raise gr.Error(str(e))
 
     seed = int(randomize_seed_fn(seed, randomize_seed))
 
@@ -370,7 +394,7 @@ def generation_all(
     mesh = face_reduce_worker(mesh)
 
     # path = export_mesh(mesh, save_folder, textured=False, type='glb')
-    path = export_mesh(mesh, save_folder, textured=False, type='obj') # 这样操作也会 core dump
+    path = export_mesh(mesh, save_folder, textured=False, type='obj') # This will also core-dump
 
     logger.info("---Face Reduction takes %s seconds ---" % (time.time() - tmp_time))
     stats['time']['face reduction'] = time.time() - tmp_time
@@ -391,10 +415,10 @@ def generation_all(
     logger.info("---Convert textured OBJ to GLB takes %s seconds ---" % (time.time() - tmp_time))
     stats['time']['convert textured OBJ to GLB'] = time.time() - tmp_time
     stats['time']['total'] = time.time() - start_time_0
-    model_viewer_html_textured = build_model_viewer_html(save_folder, 
-                                                         height=HTML_HEIGHT, 
+    model_viewer_html_textured = build_model_viewer_html(save_folder,
+                                                         height=HTML_HEIGHT,
                                                          width=HTML_WIDTH, textured=True)
-    if args.low_vram_mode:
+    if low_vram_active(args.low_vram_mode) and cuda_available():
         torch.cuda.empty_cache()
     return (
         gr.update(value=path),
@@ -441,7 +465,7 @@ def shape_generation(
 
     path = export_mesh(mesh, save_folder, textured=False)
     model_viewer_html = build_model_viewer_html(save_folder, height=HTML_HEIGHT, width=HTML_WIDTH)
-    if args.low_vram_mode:
+    if low_vram_active(args.low_vram_mode) and cuda_available():
         torch.cuda.empty_cache()
     return (
         gr.update(value=path),
@@ -739,14 +763,44 @@ if __name__ == '__main__':
     parser.add_argument("--texgen_model_path", type=str, default='tencent/Hunyuan3D-2.1')
     parser.add_argument('--port', type=int, default=8080)
     parser.add_argument('--host', type=str, default='0.0.0.0')
-    parser.add_argument('--device', type=str, default='cuda')
+    parser.add_argument('--device', type=str, default='auto',
+                        help="Device to run on. 'auto' picks largest-VRAM CUDA or CPU.")
     parser.add_argument('--mc_algo', type=str, default='mc')
     parser.add_argument('--cache-path', type=str, default='./save_dir')
     parser.add_argument('--enable_t23d', action='store_true')
     parser.add_argument('--disable_tex', action='store_true')
     parser.add_argument('--enable_flashvdm', action='store_true')
     parser.add_argument('--compile', action='store_true')
-    parser.add_argument('--low_vram_mode', action='store_true')
+    parser.add_argument(
+        '--low_vram_mode',
+        nargs='?',
+        const='conservative',
+        default='off',
+        choices=list(LOW_VRAM_CHOICES),
+        help=("Memory-conservation level. --low_vram_mode alone implies "
+              "'conservative'. 'aggressive' adds gradient checkpointing."),
+    )
+    parser.add_argument(
+        '--mmap-weights', action='store_true',
+        help="Memory-map safetensors weights (CPU loads only).",
+    )
+    parser.add_argument(
+        '--profile', type=str, default='auto',
+        choices=['auto', 'draft', 'standard', 'high', 'ultra', 'custom'],
+        help="MeshBudget profile selector.",
+    )
+    parser.add_argument(
+        '--enable-disk-offload', action='store_true',
+        help="Opt in to disk offload. WARNING: 1-5s (NVMe) per layer swap.",
+    )
+    parser.add_argument(
+        '--disk-offload-dir', type=str, default=None,
+        help="Disk offload directory.",
+    )
+    parser.add_argument(
+        '--prefer-disk-offload', action='store_true',
+        help="Pre-demote inactive stages to disk at startup.",
+    )
     args = parser.parse_args()
     
     SAVE_DIR = args.cache_path
@@ -790,17 +844,18 @@ if __name__ == '__main__':
             except Exception as fix_error:
                 print(f"Warning: Failed to apply torchvision fix: {fix_error}")
             
-            # from hy3dgen.texgen import Hunyuan3DPaintPipeline
-            # texgen_worker = Hunyuan3DPaintPipeline.from_pretrained(args.texgen_model_path)
-            # if args.low_vram_mode:
-            #     texgen_worker.enable_model_cpu_offload()
-
             from hy3dpaint.textureGenPipeline import Hunyuan3DPaintPipeline, Hunyuan3DPaintConfig
             conf = Hunyuan3DPaintConfig(max_num_view=8, resolution=768)
             conf.realesrgan_ckpt_path = "hy3dpaint/ckpt/RealESRGAN_x4plus.pth"
             conf.multiview_cfg_path = "hy3dpaint/cfgs/hunyuan-paint-pbr.yaml"
             conf.custom_pipeline = "hy3dpaint/hunyuanpaintpbr"
             tex_pipeline = Hunyuan3DPaintPipeline(conf)
+
+            # Phase 2: the previously-commented enable_model_cpu_offload is now
+            # live, gated on the graded --low_vram_mode flag.
+            _lv = normalize_low_vram(args.low_vram_mode)
+            if _lv in ("conservative", "aggressive"):
+                tex_pipeline.enable_model_cpu_offload(level=_lv)
         
             # Not help much, ignore for now.
             # if args.compile:
@@ -837,6 +892,7 @@ if __name__ == '__main__':
         subfolder=args.subfolder,
         use_safetensors=False,
         device=args.device,
+        mmap_weights=getattr(args, "mmap_weights", False),
     )
     if args.enable_flashvdm:
         mc_algo = 'mc' if args.device in ['cpu', 'mps'] else args.mc_algo
@@ -858,7 +914,7 @@ if __name__ == '__main__':
     app.mount("/static", StaticFiles(directory=static_dir, html=True), name="static")
     shutil.copytree('./assets/env_maps', os.path.join(static_dir, 'env_maps'), dirs_exist_ok=True)
 
-    if args.low_vram_mode:
+    if low_vram_active(args.low_vram_mode) and cuda_available():
         torch.cuda.empty_cache()
     demo = build_app()
     app = gr.mount_gradio_app(app, demo, path="/")

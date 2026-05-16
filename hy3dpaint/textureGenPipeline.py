@@ -33,10 +33,25 @@ from diffusers.utils import logging as diffusers_logging
 
 diffusers_logging.set_verbosity(50)
 
+# hy3d_runtime is a top-level package at the project root; entrypoints place
+# the project root on sys.path, so this import works when invoked normally.
+try:
+    from hy3d_runtime import (
+        cuda_available, pick_device, pick_dtype, RasterizerNotAvailable,
+    )
+except ImportError:  # pragma: no cover - fallback for unusual layouts
+    import sys as _sys, os as _os
+    _sys.path.insert(0, _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..")))
+    from hy3d_runtime import (
+        cuda_available, pick_device, pick_dtype, RasterizerNotAvailable,
+    )
+
 
 class Hunyuan3DPaintConfig:
     def __init__(self, max_num_view, resolution):
-        self.device = "cuda"
+        # Resolved at construction time; can be overridden by the caller before
+        # the pipeline is instantiated. Defaults to the auto-picked device.
+        self.device = str(pick_device())
 
         self.multiview_cfg_path = "hy3dpaint/cfgs/hunyuan-paint-pbr.yaml"
         self.custom_pipeline = "hunyuanpaintpbr"
@@ -72,6 +87,15 @@ class Hunyuan3DPaintPipeline:
 
     def __init__(self, config=None) -> None:
         self.config = config if config is not None else Hunyuan3DPaintConfig()
+        # Phase 3: fail fast on CPU systems with a clean message instead of
+        # crashing deep inside the rasterizer kernel import. CPU mode in this
+        # refactor is shape-only by scope; texture generation requires CUDA.
+        if not cuda_available():
+            raise RasterizerNotAvailable(
+                "Hunyuan3DPaintPipeline requires CUDA. CPU mode is shape-only "
+                "in this build — see docs/CPU_MODE.md. To get an untextured "
+                "GLB on CPU, run the shape pipeline only and skip paint."
+            )
         self.models = {}
         self.stats_logs = {}
         self.render = MeshRender(
@@ -84,14 +108,52 @@ class Hunyuan3DPaintPipeline:
         self.load_models()
 
     def load_models(self):
-        torch.cuda.empty_cache()
+        if cuda_available():
+            torch.cuda.empty_cache()
         self.models["super_model"] = imageSuperNet(self.config)
         self.models["multiview_model"] = multiviewDiffusionNet(self.config)
+        # Holds (hook, module) pairs returned by accelerate.cpu_offload_with_hook
+        # so we can release them on teardown.
+        self._offload_hooks = []
         print("Models Loaded.")
 
+    def enable_model_cpu_offload(
+        self,
+        device=None,
+        level="conservative",
+    ):
+        """Move heavy modules between GPU and CPU on the fly.
+
+        level='conservative': offloads multiview UNet + super-res.
+        level='aggressive': also offloads text_encoder, vae, dino, and enables
+        gradient checkpointing on UNets that support it.
+
+        Idempotent — repeated calls release previous hooks first.
+        """
+        if self._offload_hooks:
+            from hy3d_runtime import maybe_free_model_hooks
+            maybe_free_model_hooks(self._offload_hooks)
+            self._offload_hooks = []
+        from hunyuanpaintpbr.offload import attach_paint_offload
+        self._offload_hooks = attach_paint_offload(self, device=device, level=level)
+        return self
+
+    def maybe_free_model_hooks(self):
+        """Release CPU offload hooks. Safe to call multiple times."""
+        if self._offload_hooks:
+            from hy3d_runtime import maybe_free_model_hooks
+            maybe_free_model_hooks(self._offload_hooks)
+            self._offload_hooks = []
+
     @torch.no_grad()
-    def __call__(self, mesh_path=None, image_path=None, output_mesh_path=None, use_remesh=True, save_glb=True):
-        """Generate texture for 3D mesh using multiview diffusion"""
+    def __call__(self, mesh_path=None, image_path=None, output_mesh_path=None, use_remesh=True, save_glb=True, budget=None):
+        """Generate texture for 3D mesh using multiview diffusion.
+
+        Phase 5: when `budget` is provided, the mesh is decimated to
+        budget.target_faces (instead of the legacy 40000). Texture/render
+        sizes still come from the MeshRender configuration set at __init__;
+        a future change can rebuild the renderer for an OOM-driven downgrade.
+        """
         # Ensure image_prompt is a list
         if isinstance(image_path, str):
             image_prompt = Image.open(image_path)
@@ -106,7 +168,7 @@ class Hunyuan3DPaintPipeline:
         path = os.path.dirname(mesh_path)
         if use_remesh:
             processed_mesh_path = os.path.join(path, "white_mesh_remesh.obj")
-            remesh_mesh(mesh_path, processed_mesh_path)
+            remesh_mesh(mesh_path, processed_mesh_path, budget=budget)
         else:
             processed_mesh_path = mesh_path
 
