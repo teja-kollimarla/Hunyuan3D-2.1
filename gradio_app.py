@@ -802,7 +802,15 @@ if __name__ == '__main__':
         help="Pre-demote inactive stages to disk at startup.",
     )
     args = parser.parse_args()
-    
+
+    # Two-device routing:
+    #   SHAPE_DEVICE — shape diffusion (MPS-capable with PYTORCH_ENABLE_MPS_FALLBACK=1)
+    #   PAINT_DEVICE — texture pipeline (always CPU for non-CUDA; rasterizer has no MPS kernel)
+    from hy3dpaint.utils.device_utils import normalize_device, normalize_shape_device, safe_cuda_empty_cache
+    SHAPE_DEVICE = normalize_shape_device(args.device)
+    PAINT_DEVICE = normalize_device(args.device)
+    print(f"[hy3d] shape device: {SHAPE_DEVICE} | paint device: {PAINT_DEVICE}")
+
     SAVE_DIR = args.cache_path
     os.makedirs(SAVE_DIR, exist_ok=True)
 
@@ -845,7 +853,7 @@ if __name__ == '__main__':
                 print(f"Warning: Failed to apply torchvision fix: {fix_error}")
             
             from hy3dpaint.textureGenPipeline import Hunyuan3DPaintPipeline, Hunyuan3DPaintConfig
-            conf = Hunyuan3DPaintConfig(max_num_view=8, resolution=768)
+            conf = Hunyuan3DPaintConfig(max_num_view=8, resolution=768, device=PAINT_DEVICE)
             conf.realesrgan_ckpt_path = "hy3dpaint/ckpt/RealESRGAN_x4plus.pth"
             conf.multiview_cfg_path = "hy3dpaint/cfgs/hunyuan-paint-pbr.yaml"
             conf.custom_pipeline = "hy3dpaint/hunyuanpaintpbr"
@@ -895,7 +903,7 @@ if __name__ == '__main__':
         mmap_weights=getattr(args, "mmap_weights", False),
     )
     if args.enable_flashvdm:
-        mc_algo = 'mc' if args.device in ['cpu', 'mps'] else args.mc_algo
+        mc_algo = 'mc' if SHAPE_DEVICE.type != 'cuda' else args.mc_algo
         i23d_worker.enable_flashvdm(mc_algo=mc_algo)
     if args.compile:
         i23d_worker.compile()

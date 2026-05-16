@@ -338,10 +338,10 @@ class MeshRender:
     ):
         """
         Initialize mesh renderer with configurable parameters.
-        
+
         Args:
             camera_distance: Distance from camera to object center
-            camera_type: Type of camera projection ("orth" or "perspective") 
+            camera_type: Type of camera projection ("orth" or "perspective")
             default_resolution: Default rendering resolution
             texture_size: Size of texture maps
             use_antialias: Whether to use antialiasing

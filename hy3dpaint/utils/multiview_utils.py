@@ -52,6 +52,18 @@ class multiviewDiffusionNet:
         )
 
         model_path = os.path.join(model_path, "hunyuan3d-paintpbr-v2-1")
+
+        # Single device classification — drives every dtype/memory decision below.
+        _dev = self.device if isinstance(self.device, torch.device) else torch.device(str(self.device))
+        _is_cuda = (_dev.type == "cuda")
+
+        # Dtype: fp16 only on CUDA. CPU fp16 segfaults inside attention kernels;
+        # MPS fp16 is unstable. CUDA path keeps upstream fp16 for speed/memory.
+        model_dtype = torch.float16 if _is_cuda else torch.float32
+
+        # low_cpu_mem_usage uses accelerate's meta-tensor loading to roughly halve
+        # the load-time memory spike. Harmless on CUDA, essential on Mac to even
+        # get the model into RAM before inference starts.
         pipeline = DiffusionPipeline.from_pretrained(
             model_path,
             custom_pipeline=custom_pipeline,
@@ -63,6 +75,19 @@ class multiviewDiffusionNet:
         pipeline.eval()
         setattr(pipeline, "view_size", cfg.model.params.get("view_size", 320))
         self.pipeline = pipeline.to(self.device)
+
+        # NOTE: `enable_attention_slicing` is intentionally NOT called here.
+        # It would replace this model's custom SelfAttnProcessor2_0 (which
+        # handles the 5D multiview tensor (B, n_pbrs, N, L, C) with an internal
+        # rearrange) with a generic SlicedAttnProcessor expecting 3D — causing
+        # `ValueError: too many values to unpack (expected 3)` at diffusers'
+        # attention_processor.py:3278. The custom processor cannot be sliced
+        # because it's the entire reason multiview fusion works.
+        # Memory reduction on CPU comes from: fp32 weights, smaller render
+        # canvas (textureGenPipeline.py), capped view count, and VAE slicing.
+        if not _is_cuda:
+            try: self.pipeline.enable_vae_slicing()
+            except Exception: pass
 
         if hasattr(self.pipeline.unet, "use_dino") and self.pipeline.unet.use_dino:
             from hunyuanpaintpbr.unet.modules import Dino_v2
@@ -115,9 +140,14 @@ class multiviewDiffusionNet:
 
         sync_condition = None
 
+        # UniPC steps: upstream uses 15; on CPU each step is a full fp32 UNet
+        # forward — fewer steps means fewer peak-allocation events. UniPC
+        # degrades gracefully; 10 is the floor before structure suffers.
+        _dev = self.device if isinstance(self.device, torch.device) else torch.device(str(self.device))
+        _cpu_path = (_dev.type != "cuda")
         infer_steps_dict = {
             "EulerAncestralDiscreteScheduler": 30,
-            "UniPCMultistepScheduler": 15,
+            "UniPCMultistepScheduler": 10 if _cpu_path else 15,
             "DDIMScheduler": 50,
             "ShiftSNRScheduler": 15,
         }

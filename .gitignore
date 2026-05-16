@@ -5,7 +5,7 @@ __pycache__/
 
 # C extensions
 *.so
-
+3d/
 # Distribution / packaging
 .Python
 build/
@@ -186,3 +186,5 @@ demo_untextured.glb
 white_mesh_remesh.obj
 hy3dpaint/ckpt/
 
+output/
+assets/

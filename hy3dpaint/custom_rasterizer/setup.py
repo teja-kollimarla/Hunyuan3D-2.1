@@ -12,29 +12,66 @@
 # fine-tuning enabling code and other elements of the foregoing made publicly available
 # by Tencent in accordance with TENCENT HUNYUAN COMMUNITY LICENSE AGREEMENT.
 
-from setuptools import setup, find_packages
+import os
+import sys
 import torch
-from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CppExtension
-
-# build custom rasterizer
-
-custom_rasterizer_module = CUDAExtension(
-    "custom_rasterizer_kernel",
-    [
-        "lib/custom_rasterizer_kernel/rasterizer.cpp",
-        "lib/custom_rasterizer_kernel/grid_neighbor.cpp",
-        "lib/custom_rasterizer_kernel/rasterizer_gpu.cu",
-    ],
+from setuptools import setup, find_packages
+from torch.utils.cpp_extension import (
+    BuildExtension, CppExtension, CUDAExtension, CUDA_HOME,
 )
 
+# On macOS, the linker doesn't automatically embed an rpath to PyTorch's own
+# dylibs (libc10.dylib, libtorch.dylib, etc.), so we add it explicitly.
+# On Linux/Windows this is a no-op harmless extra rpath.
+_torch_lib_dir = os.path.join(os.path.dirname(torch.__file__), "lib")
+_extra_link_args: list[str] = []
+if sys.platform == "darwin":
+    _extra_link_args = [f"-Wl,-rpath,{_torch_lib_dir}"]
+
+
+def cuda_build_possible():
+    """True only when CUDA headers + nvcc are reachable.
+
+    Honours FORCE_CPU=1 / FORCE_CUDA=1 env overrides.
+    Uses torch's CUDA_HOME resolver (works on Windows too).
+    """
+    if os.environ.get("FORCE_CPU", "0") == "1":
+        return False
+    if os.environ.get("FORCE_CUDA", "0") == "1":
+        return True
+    if not torch.cuda.is_available():
+        return False
+    return CUDA_HOME is not None and os.path.exists(CUDA_HOME)
+
+
+sources = [
+    "lib/custom_rasterizer_kernel/rasterizer.cpp",
+    "lib/custom_rasterizer_kernel/grid_neighbor.cpp",
+]
+
+if cuda_build_possible():
+    print("[custom_rasterizer] Building WITH CUDA support.")
+    sources.append("lib/custom_rasterizer_kernel/rasterizer_gpu.cu")
+    ext = CUDAExtension(
+        "custom_rasterizer_kernel",
+        sources,
+        define_macros=[("WITH_CUDA", None)],
+        extra_link_args=_extra_link_args,
+    )
+else:
+    print("[custom_rasterizer] CUDA not available — building CPU-only.")
+    ext = CppExtension(
+        "custom_rasterizer_kernel",
+        sources,
+        extra_link_args=_extra_link_args,
+    )
+
 setup(
-    packages=find_packages(),
-    version="0.1",
     name="custom_rasterizer",
-    include_package_data=True,
+    version="0.1",
+    packages=find_packages(),
     package_dir={"": "."},
-    ext_modules=[
-        custom_rasterizer_module,
-    ],
+    include_package_data=True,
+    ext_modules=[ext],
     cmdclass={"build_ext": BuildExtension},
 )

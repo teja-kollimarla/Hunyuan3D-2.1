@@ -13,7 +13,6 @@
 # by Tencent in accordance with TENCENT HUNYUAN COMMUNITY LICENSE AGREEMENT.
 
 import trimesh
-import pymeshlab
 
 
 def remesh_mesh(mesh_path, remesh_path, budget=None):
@@ -38,5 +37,8 @@ def mesh_simplify_trimesh(inputpath, outputpath, target_count=40000):
     face_num = courent.faces.shape[0]
 
     if face_num > target_count:
-        courent = courent.simplify_quadric_decimation(target_count)
-    courent.export(outputpath)
+        mesh = mesh.simplify_quadric_decimation(target_count)
+
+    # Always export as OBJ (strip any .glb suffix confusion)
+    out_path = outputpath.replace(".glb", ".obj")
+    mesh.export(out_path)
