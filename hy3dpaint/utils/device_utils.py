@@ -42,8 +42,24 @@ def cpu_fp32_guard(device):
 # Device resolvers
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _free_mem_sorted_gpus():
+    """CUDA GPUs sorted by free VRAM descending. [] if no CUDA or import fails."""
+    try:
+        from hy3d_runtime import gpu_inventory
+    except ImportError:
+        return []
+    inv = gpu_inventory()
+    return sorted(inv, key=lambda g: g.free_mem, reverse=True)
+
+
 def _auto_shape_device() -> torch.device:
-    """Best available device for shape/diffusion (MPS-capable)."""
+    """Best available device for shape/diffusion (MPS-capable).
+
+    With multiple CUDA GPUs visible, picks the one with the most free VRAM.
+    """
+    gpus = _free_mem_sorted_gpus()
+    if gpus:
+        return gpus[0].torch_device
     if torch.cuda.is_available():
         return torch.device("cuda:0")
     if torch.backends.mps.is_available():
@@ -52,7 +68,16 @@ def _auto_shape_device() -> torch.device:
 
 
 def _auto_paint_device() -> torch.device:
-    """Best available device for texture pipeline (no MPS — rasterizer is CPU-only)."""
+    """Best available device for texture pipeline (no MPS — rasterizer is CPU-only).
+
+    With 2+ CUDA GPUs visible, picks the GPU with the SECOND-most free VRAM so
+    paint lands on a different device than shape. Extra GPUs beyond the second
+    stay idle (headroom). With one GPU, falls back to that GPU. Explicit
+    --paint_device always overrides this.
+    """
+    gpus = _free_mem_sorted_gpus()
+    if gpus:
+        return gpus[1].torch_device if len(gpus) >= 2 else gpus[0].torch_device
     if torch.cuda.is_available():
         return torch.device("cuda:0")
     return torch.device("cpu")

@@ -106,6 +106,11 @@ def get_args():
     p.add_argument("--device", default="auto",
                    help="auto | cuda | cuda:N | mps | cpu. "
                         "'auto' picks CUDA if available, MPS on Apple Silicon, then CPU. default: auto")
+    p.add_argument("--shape_device", default=None,
+                   help="Override device for shape stage only (e.g. cuda:0). Falls back to --device.")
+    p.add_argument("--paint_device", default=None,
+                   help="Override device for paint stage only (e.g. cuda:1). Falls back to --device. "
+                        "Use with --shape_device to split stages across two GPUs.")
 
     # Features
     p.add_argument("--rembg", action="store_true",
@@ -169,8 +174,8 @@ def main():
     # normalize_device:       CUDA → CPU        (no MPS; rasterizer is CPU-only)
     from hy3dpaint.utils.device_utils import normalize_device, normalize_shape_device
 
-    shape_device = normalize_shape_device(args.device)
-    paint_device = normalize_device(args.device)
+    shape_device = normalize_shape_device(args.shape_device or args.device)
+    paint_device = normalize_device(args.paint_device or args.device)
     print(f"[hy3d] shape device: {shape_device} | paint device: {paint_device}")
 
     # ── Output directory ──────────────────────────────────────────────────────

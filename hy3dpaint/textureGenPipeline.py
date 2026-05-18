@@ -62,10 +62,17 @@ except ImportError:  # pragma: no cover - fallback for unusual layouts
 
 
 class Hunyuan3DPaintConfig:
-    def __init__(self, max_num_view, resolution):
+    def __init__(self, max_num_view, resolution, device=None):
         # Resolved at construction time; can be overridden by the caller before
         # the pipeline is instantiated. Defaults to the auto-picked device.
-        self.device = str(pick_device())
+        # Stored as torch.device — `_is_cuda` below and `multiview_utils.py`
+        # both rely on `.type`. Consumers that need a string call str(...).
+        if device is None:
+            self.device = pick_device()
+        elif isinstance(device, torch.device):
+            self.device = device
+        else:
+            self.device = torch.device(str(device))
 
         self.multiview_cfg_path = "hy3dpaint/cfgs/hunyuan-paint-pbr.yaml"
         self.custom_pipeline = "hunyuanpaintpbr"
