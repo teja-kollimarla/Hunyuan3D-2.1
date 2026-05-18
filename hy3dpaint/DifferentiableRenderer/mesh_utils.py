@@ -14,11 +14,20 @@
 
 import os
 import cv2
-import bpy
 import math
 import numpy as np
 from io import StringIO
 from typing import Optional, Tuple, Dict, Any
+
+# bpy is only required by convert_obj_to_glb (Blender-based OBJ→GLB). load_mesh
+# and save_mesh work without it. On environments where bpy can't be imported
+# (Kaggle, headless servers without Blender), the module must still load so
+# those bpy-free helpers stay usable; the trimesh fallback in
+# textureGenPipeline.py handles OBJ→GLB conversion.
+try:
+    import bpy
+except ImportError:
+    bpy = None
 
 
 def _safe_extract_attribute(obj: Any, attr_path: str, default: Any = None) -> Any:

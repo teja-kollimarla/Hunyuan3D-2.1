@@ -28,6 +28,12 @@ from utils.image_super_utils import imageSuperNet
 from utils.uvwrap_utils import mesh_uv_wrap
 try:
     from DifferentiableRenderer.mesh_utils import convert_obj_to_glb as _convert_obj_to_glb_bpy
+    from DifferentiableRenderer.mesh_utils import bpy as _bpy
+    if _bpy is None:
+        # mesh_utils loaded but bpy itself isn't installed — the Blender-backed
+        # converter would silently return False. Force the trimesh fallback.
+        _convert_obj_to_glb_bpy = None
+        print("[hy3d] bpy unavailable; using trimesh fallback for OBJ->GLB.")
 except Exception as _e:
     _convert_obj_to_glb_bpy = None
     print(f"[hy3d] bpy unavailable ({_e.__class__.__name__}); using trimesh fallback for OBJ->GLB.")
