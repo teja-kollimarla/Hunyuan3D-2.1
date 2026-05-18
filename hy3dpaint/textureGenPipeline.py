@@ -26,6 +26,7 @@ from utils.multiview_utils import multiviewDiffusionNet
 from utils.pipeline_utils import ViewProcessor
 from utils.image_super_utils import imageSuperNet
 from utils.uvwrap_utils import mesh_uv_wrap
+from utils.device_utils import safe_cuda_empty_cache
 try:
     from DifferentiableRenderer.mesh_utils import convert_obj_to_glb as _convert_obj_to_glb_bpy
     from DifferentiableRenderer.mesh_utils import bpy as _bpy
