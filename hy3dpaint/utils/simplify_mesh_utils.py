@@ -33,10 +33,8 @@ def mesh_simplify_trimesh(inputpath, outputpath, target_count=40000):
         ms.load_new_mesh(inputpath)
     ms.save_current_mesh(outputpath.replace(".glb", ".obj"), save_textures=False)
     # Run the face-reduction routine
-    courent = trimesh.load(outputpath.replace(".glb", ".obj"), force="mesh")
-    face_num = courent.faces.shape[0]
-
-    if face_num > target_count:
+    mesh = trimesh.load(outputpath.replace(".glb", ".obj"), force="mesh")
+    if mesh.faces.shape[0] > target_count:
         mesh = mesh.simplify_quadric_decimation(target_count)
 
     # Always export as OBJ (strip any .glb suffix confusion)
