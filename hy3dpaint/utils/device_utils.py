@@ -70,14 +70,15 @@ def _auto_shape_device() -> torch.device:
 def _auto_paint_device() -> torch.device:
     """Best available device for texture pipeline (no MPS — rasterizer is CPU-only).
 
-    With 2+ CUDA GPUs visible, picks the GPU with the SECOND-most free VRAM so
-    paint lands on a different device than shape. Extra GPUs beyond the second
-    stay idle (headroom). With one GPU, falls back to that GPU. Explicit
-    --paint_device always overrides this.
+    `auto` picks the GPU with the most free VRAM. Cross-GPU splitting (shape on
+    one GPU, paint on another) is supported: multiview_utils.py now explicitly
+    moves the HF-cached WrappedUNet's inner UNet to the target device, closing
+    the gap that caused "Expected all tensors to be on the same device". Use
+    `--shape_device cuda:0 --paint_device cuda:1` to split explicitly.
     """
     gpus = _free_mem_sorted_gpus()
     if gpus:
-        return gpus[1].torch_device if len(gpus) >= 2 else gpus[0].torch_device
+        return gpus[0].torch_device
     if torch.cuda.is_available():
         return torch.device("cuda:0")
     return torch.device("cpu")

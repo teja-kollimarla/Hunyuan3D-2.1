@@ -61,6 +61,12 @@ class multiviewDiffusionNet:
         # MPS fp16 is unstable. CUDA path keeps upstream fp16 for speed/memory.
         model_dtype = torch.float16 if _is_cuda else torch.float32
 
+        # Set the default CUDA device before loading so any tensors created during
+        # model __init__ land on the target GPU rather than defaulting to cuda:0.
+        # This prevents cross-device mismatches in the HF-cached custom modules.
+        if _is_cuda:
+            torch.cuda.set_device(_dev)
+
         # low_cpu_mem_usage uses accelerate's meta-tensor loading to roughly halve
         # the load-time memory spike. Harmless on CUDA, essential on Mac to even
         # get the model into RAM before inference starts.
@@ -75,6 +81,18 @@ class multiviewDiffusionNet:
         pipeline.eval()
         setattr(pipeline, "view_size", cfg.model.params.get("view_size", 320))
         self.pipeline = pipeline.to(self.device)
+        # The HF-cached WrappedUNet (diffusers_modules/local/modules.py) wraps the
+        # real UNet2DConditionModel in self.unet using object.__setattr__, bypassing
+        # PyTorch's submodule registry. Neither pipeline.to() nor pipeline.unet.to()
+        # reaches it through the standard recursive traversal — so the inner model's
+        # weights can end up on a different device than the activations flowing through
+        # the outer wrapper, causing "Expected all tensors to be on the same device".
+        # Fix: move each layer of the wrapper chain explicitly.
+        if hasattr(self.pipeline, 'unet'):
+            self.pipeline.unet.to(self.device)
+            inner_unet = getattr(self.pipeline.unet, 'unet', None)
+            if isinstance(inner_unet, torch.nn.Module):
+                inner_unet.to(self.device)
 
         # NOTE: `enable_attention_slicing` is intentionally NOT called here.
         # It would replace this model's custom SelfAttnProcessor2_0 (which
